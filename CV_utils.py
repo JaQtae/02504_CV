@@ -4,6 +4,9 @@ import cv2
 import itertools as it
 import matplotlib.pyplot as plt
 from scipy.optimize import least_squares
+from scipy import ndimage
+from scipy.spatial.transform import Rotation
+from skimage.transform import hough_line, hough_line_peaks
 
 ###########################
 ######### WEEK 1 ##########
@@ -204,6 +207,22 @@ def triangulate(
     Q = v[-1]
     return Pi(Q)
 
+
+def DrawLine(l, shape, ax=None):
+#Checks where the line intersects the four sides of the image
+# and finds the two intersections that are within the frame
+    def in_frame(l_im):
+        q = np.cross(l.flatten(), l_im)
+        q = q[:2]/q[2]
+        if all(q>=0) and all(q+1<=shape[1::-1]):
+            return q
+    lines = [[1, 0, 0], [0, 1, 0], [1, 0, 1-shape[1]], [0, 1, 1-shape[0]]]
+    P = [in_frame(l_im) for l_im in lines if in_frame(l_im) is not None]
+    if ax is None:
+        plt.plot(*np.array(P).T, c='blue')
+    else:
+        ax.plot(*np.array(P).T, c='blue')
+
 ###########################
 ######### WEEK 4 ##########
 ###########################
@@ -312,6 +331,11 @@ def cornerDetector(
     c = np.vstack(c)[::-1]
     return c
 
+
+###########################
+######### WEEK 7 ##########
+###########################
+
 def lines_from_points(
         p1: np.ndarray, 
         p2: np.ndarray
@@ -373,6 +397,8 @@ def detectBlobs(
     scales = scales[mask]
     return blobs, scales
     
+
+
 
 
 ###########################
