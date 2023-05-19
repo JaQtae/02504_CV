@@ -3,6 +3,7 @@ import math
 import cv2
 import itertools as it
 import matplotlib.pyplot as plt
+from scipy.optimize import least_squares
 
 ###########################
 ######### WEEK 1 ##########
@@ -216,6 +217,162 @@ def estimateHomographies(
     # Estimate homographies.
     Hs = [hestRune(qi, Q_tilde) for qi in qs]
     return Hs
+
+###########################
+######### WEEK 5 ##########
+###########################
+
+def triangulate_nonlin(
+        q: np.array, 
+        P: np.array) -> np.array:
+    
+    def compute_residuals(Qest):
+        return np.concatenate([Pi(Pj @ Qest) - qj for Pj, qj in zip(P, q.T)])
+    Q0 = PiInv(triangulate(q, P))
+    out = least_squares(compute_residuals, Q0)
+    return Pi(out.x)
+
+###########################
+######### WEEK 6 ##########
+###########################
+
+from scipy.ndimage import convolve1d, maximum_filter
+from typing import Union
+
+def gaussian1DKernel(
+        sigma: Union[float, int], 
+        sigma_mult: Union[float, int]=5
+    ) -> tuple[np.ndarray, np.ndarray]:
+    # Length of the kernel.
+    kernel_length = int(sigma_mult * sigma)
+
+    # Variance.
+    var = sigma**2
+    
+    # Create Gaussian kernel.
+    x = np.arange(-kernel_length, kernel_length + 1)
+    g = np.exp(-x**2 / (2 * var))
+    g /= g.sum()
+    gd = -x / var * g
+    return g, gd
+
+def gaussianSmoothing(
+        im: np.ndarray, 
+        sigma: Union[float, int]
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    
+    if abs(sigma) < 1e-4:
+        return im, im, im
+    g, gd = gaussian1DKernel(sigma)
+    I = convolve1d(im, g, axis=1)
+    Ix = convolve1d(I, gd, axis=0)
+    Iy = convolve1d(convolve1d(im, g, axis=0), gd, axis=1)
+    I = convolve1d(I, g, axis=0)
+    return I, Ix, Iy
+
+def smoothedHessian(
+        im: np.ndarray, 
+        sigma: Union[float, int], 
+        epsilon: Union[float, int]
+    ) -> np.ndarray:
+    g_eps, _ = gaussian1DKernel(epsilon)
+    _, Ix, Iy = gaussianSmoothing(im, sigma)
+    IxIy = Ix * Iy
+    C = [Ix * Ix, IxIy, Iy * Iy]
+    for i in range(3):
+        C[i] = convolve1d(convolve1d(C[i], g_eps, axis=0), g_eps, axis=1)
+    C = np.stack(C)
+    return C
+
+def harrisMeasure(
+        im: np.ndarray, 
+        sigma: Union[float, int],
+        epsilon: Union[float, int],
+        k: Union[float, int]
+    ) -> np.ndarray:
+    (a, c, b) = smoothedHessian(im, sigma, epsilon)
+    ab = a + b
+    r = a * b - c * c - k * (ab * ab)
+    return r
+
+def cornerDetector(
+        im: np.ndarray, 
+        sigma: Union[float, int], 
+        epsilon: Union[float, int], 
+        k: Union[float, int], 
+        tau: Union[float, int]
+    ) -> np.ndarray:
+    r = harrisMeasure(im, sigma, epsilon, k)
+    r_max_filt = maximum_filter(r, size=3)
+    r_min_filt = -maximum_filter(-r, size=3)
+    tol = tau * r.max()
+    
+    c = (r == r_max_filt) & (r != r_min_filt) & (r > tol)
+    c = np.where(c)
+    c = np.vstack(c)[::-1]
+    return c
+
+def lines_from_points(
+        p1: np.ndarray, 
+        p2: np.ndarray
+    ) -> np.ndarray:
+    assert p1.shape == p2.shape
+    if p1.shape[0] == 2:
+        p1, p2 = PiInv(p1), PiInv(p2)
+    lines = np.cross(p1, p2, axisa=0, axisb=0).T
+    return lines
+
+def line_inliers(
+        l: np.ndarray,
+        points: np.ndarray,
+        tau: Union[float, int]=1
+    ) -> np.ndarray:
+   if points.shape[0] == 2:
+       points = PiInv(points)
+   dists = l @ points / (l[0]**2 + l[1]**2)
+   inliers = np.abs(dists) <= tau
+   return inliers
+
+def scaleSpaced(
+        im: np.ndarray, 
+        sigma: Union[float, int], 
+        n: int
+    ) -> list[np.ndarray]:
+    g, _ = gaussian1DKernel(sigma)
+    im_scales = [convolve1d(convolve1d(im, g, axis=1), g, axis=0)]
+    for i in range(1, n):
+        sigma_i = np.sqrt((sigma * 2**i)**2 - (sigma * 2**(i-1))**2)
+        g, _ = gaussian1DKernel(sigma_i)
+        im_scales.append(convolve1d(convolve1d(im_scales[-1], g, axis=1), g, axis=0))
+    return im_scales
+
+def differenceOfGaussians(
+        im: np.ndarray, 
+        sigma: Union[float, int], 
+        n: int
+    ) -> list[np.ndarray]:
+    im_scales = scaleSpaced(im, sigma, n+1)
+    DoG = [im_scales[i+1] - im_scales[i] for i in range(n)]
+    return DoG
+
+def detectBlobs(
+        im: np.ndarray, 
+        sigma: Union[float, int], 
+        n: int,
+        tau: Union[float, int]
+    ) -> list[np.ndarray]:
+    DoG = differenceOfGaussians(im, sigma, n)
+    DoG = np.abs(np.stack(DoG))
+    DoG_max_filt = maximum_filter(DoG, size=(1, 3, 3))
+    DoG[DoG < DoG_max_filt] = 0
+    ArgMaxDog = DoG.argmax(0)
+    MaxDog = DoG.max(0)
+    scales = sigma * 2 ** ArgMaxDog
+    mask = MaxDog > tau
+    blobs = np.vstack(np.where(mask)).T
+    scales = scales[mask]
+    return blobs, scales
+    
 
 
 ###########################
